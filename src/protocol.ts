@@ -44,8 +44,8 @@ export interface ScriptAxis {
 }
 
 /** How the guest is doing, for the host's panel. */
-export type GuestState = 'nothing' | 'loading' | 'matched' | 'missing' | 'borrowed' | 'hold' | 'panic'
-const GUEST_STATES: readonly string[] = ['nothing', 'loading', 'matched', 'missing', 'borrowed', 'hold', 'panic']
+export type GuestState = 'nothing' | 'loading' | 'matched' | 'missing' | 'hold' | 'panic'
+const GUEST_STATES: readonly string[] = ['nothing', 'loading', 'matched', 'missing', 'hold', 'panic']
 
 export type Msg
   = | { t: 'hello', v: number, role: Role, app: string }
@@ -61,6 +61,7 @@ export type Msg
     | { t: 'script', video: string, axes: ScriptAxis[] }
     | { t: 'noScript' }
     | { t: 'status', s: GuestState, drift: number }
+    | { t: 'chat', text: string }
 
 export const LIMITS = {
   title: 300,
@@ -71,6 +72,8 @@ export const LIMITS = {
   /** Points per axis (each is two numbers). Long scripts run to tens of thousands. */
   points: 200_000,
   maxPos: 24 * 3600,
+  /** Characters in one chat message (see chat.ts). */
+  chat: 1000,
 }
 
 type Obj = Record<string, unknown>
@@ -136,6 +139,8 @@ export function parseMessage(x: unknown): Msg | null {
       if (x.a === 'play' || x.a === 'pause')
         return { t: 'ctl', a: x.a }
       return x.a === 'seek' && num(x.pos, 0, LIMITS.maxPos) ? { t: 'ctl', a: 'seek', pos: x.pos } : null
+    case 'chat':
+      return str(x.text, LIMITS.chat) && x.text.trim() ? { t: 'chat', text: x.text } : null
     case 'status':
       return typeof x.s === 'string' && GUEST_STATES.includes(x.s) && num(x.drift, -LIMITS.maxPos, LIMITS.maxPos)
         ? { t: 'status', s: x.s as GuestState, drift: x.drift }

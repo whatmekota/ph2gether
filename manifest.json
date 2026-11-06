@@ -1,10 +1,15 @@
 {
   "id": "ph2gether",
   "name": "ph2gether",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Together mode: watch and play in sync with a partner over the internet, each with your own playhound and device.",
   "author": "whatmekota",
   "main": "index.js",
   "api": 2,
-  "permissions": ["player", "playback", "library", "scripts", "network"]
+  "permissions": [
+    "player",
+    "playback",
+    "library",
+    "network"
+  ]
 }

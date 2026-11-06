@@ -1,10 +1,12 @@
+import type { ChatLine } from './chat'
 import type { Link } from './net'
 import type { GuestState, Msg, Role, StateMsg, VideoRef } from './protocol'
 import type { RoomCode, Strategy } from './room'
 import type { PluginContext } from './types'
+import { CHAT_KEEP, cleanChat, createRateLimit } from './chat'
 import { sasEmojis, sdpFingerprint } from './emoji'
 import { openLink } from './net'
-import { flatten, PROTOCOL, unflatten } from './protocol'
+import { PROTOCOL } from './protocol'
 import { deriveRoom, makeCode, parseCode, STRATEGIES } from './room'
 import { ClockSync, clockSample, correction, hostPositionAt, jumped, SYNC } from './sync'
 
@@ -19,7 +21,6 @@ export type Follow
     | 'loading' // putting on the same file
     | 'matched' // same file, in step
     | 'missing' // the guest doesn't have it
-    | 'borrowed' // the guest's own video with the host's script
 
 /** What the guest tells the host about itself, for the host's panel. */
 export type GuestStatus = GuestState
@@ -50,8 +51,6 @@ export interface View {
   /** Guest − host, seconds, as last measured. */
   driftS: number | null
   panicked: boolean
-  /** A script request is out. */
-  fetchingScript: boolean
 }
 
 const STRATEGY_NAMES: Record<Strategy, string> = { nostr: 'Nostr relays', torrent: 'BitTorrent trackers', mqtt: 'MQTT brokers' }
@@ -66,6 +65,11 @@ const now = () => performance.now()
  */
 export class Together {
   private link: Link | null = null
+  /** The chat with the partner, this room. */
+  chat: ChatLine[] = []
+  /** Open copies of the panel; a message that arrives with none gets a toast. */
+  panelsOpen = 0
+  private chatLimit = createRateLimit()
   private room: RoomCode | null = null
   private partner: string | null = null
   private partnerSaidBye = false
@@ -134,8 +138,28 @@ export class Together {
       guestStatus: null,
       driftS: null,
       panicked: false,
-      fetchingScript: false,
     }
+  }
+
+  /** Send a chat message. False when there's nobody to send it to, nothing to send, or it's too fast. */
+  sendChat(text: string): boolean {
+    const clean = cleanChat(text)
+    if (!clean || this.view.phase !== 'connected' || !this.partner)
+      return false
+    if (!this.chatLimit(now())) {
+      this.ctx.ui.toast('Slow down a little', { detail: 'Too many messages at once' })
+      return false
+    }
+    this.send({ t: 'chat', text: clean })
+    this.addChat({ from: 'me', text: clean, at: Date.now() })
+    return true
+  }
+
+  private addChat(line: ChatLine) {
+    this.chat.push(line)
+    if (this.chat.length > CHAT_KEEP)
+      this.chat.splice(0, this.chat.length - CHAT_KEEP)
+    this.changed()
   }
 
   requestJoinFocus() {
@@ -246,6 +270,7 @@ export class Together {
   }
 
   private resetRoom() {
+    this.chat = []
     for (const t of this.timers)
       clearInterval(t)
     this.timers = []
@@ -404,17 +429,11 @@ export class Together {
         if (this.view.role === 'host')
           this.changed({ guestStatus: m.s, driftS: m.drift })
         break
-      case 'getScript':
-        if (this.view.role === 'host')
-          this.sendScript()
-        break
-      case 'script':
-        if (this.view.role === 'guest')
-          this.onScript(m)
-        break
-      case 'noScript':
-        if (this.view.role === 'guest')
-          this.changed({ fetchingScript: false, notice: { tone: 'warn', text: 'Your partner has no script loaded for it.' } })
+      case 'chat':
+        this.addChat({ from: 'them', text: m.text, at: Date.now() })
+        // Nobody's looking at the panel: say it where it will be seen.
+        if (!this.panelsOpen)
+          this.ctx.ui.toast(m.text.length > 120 ? `${m.text.slice(0, 117)}…` : m.text, { detail: 'From your partner, in Together' })
         break
     }
   }
@@ -587,19 +606,6 @@ export class Together {
       this.ctx.player.seek(m.pos)
   }
 
-  private sendScript() {
-    const cur = this.ctx.scripts.current()
-    if (!cur.axes.length || !this.view.video) {
-      this.send({ t: 'noScript' })
-      return
-    }
-    this.send({
-      t: 'script',
-      video: this.view.video.fp ?? this.view.video.title,
-      axes: cur.axes.slice(0, 8).map(a => ({ axis: a.axis, name: a.name.slice(0, 40), actions: flatten(a.actions) })),
-    })
-  }
-
   // ─── Guest ──────────────────────────────────────────────────────────────
 
   private ourPause() {
@@ -673,7 +679,7 @@ export class Together {
       this.applyAll()
       return
     }
-    if (v.follow !== 'matched' && v.follow !== 'borrowed')
+    if (v.follow !== 'matched')
       return
     if (!prev || prev.playing !== m.playing) {
       this.changed({ hold: false })
@@ -695,7 +701,7 @@ export class Together {
   /** Play state, position and speed, all at once (a new video, a reconnect, catching up). */
   private applyAll() {
     const m = this.host
-    if (!m || (this.view.follow !== 'matched' && this.view.follow !== 'borrowed'))
+    if (!m || (this.view.follow !== 'matched'))
       return
     this.changed({ hold: false })
     this.applyRate(m.rate)
@@ -713,23 +719,23 @@ export class Together {
   private async switchVideo(video: VideoRef | null) {
     if (!video) {
       this.ourPause()
-      this.changed({ follow: 'nothing', fetchingScript: false })
+      this.changed({ follow: 'nothing' })
       return
     }
     const key = this.targetKey
     // Already on it?
     const s = this.ctx.player.state()
     if (video.fp && s.title && await this.fingerprintOf(s.title) === video.fp) {
-      this.changed({ follow: 'matched', fetchingScript: false, notice: null })
+      this.changed({ follow: 'matched', notice: null })
       return
     }
     if (!video.fp) {
       // What plays here has nothing to do with theirs: stop it, and the device with it.
       this.ourPause()
-      this.changed({ follow: 'missing', fetchingScript: false })
+      this.changed({ follow: 'missing' })
       return
     }
-    this.changed({ follow: 'loading', fetchingScript: false })
+    this.changed({ follow: 'loading' })
     let ok = false
     try {
       ok = await this.ctx.playback.playFingerprint(video.fp)
@@ -756,49 +762,13 @@ export class Together {
     this.changed({ follow: 'matched', notice: null })
   }
 
-  /** Ask the host for its script, to play over whatever video the guest has open. */
-  requestScript() {
-    if (this.view.role !== 'guest' || !this.partner)
-      return
-    if (!this.ctx.player.state().title) {
-      this.notice('Open any video first: their script plays along with it. One at least as long as theirs works best.', 'warn')
-      return
-    }
-    this.changed({ fetchingScript: true, notice: null })
-    this.send({ t: 'getScript' })
-  }
-
-  private onScript(m: Extract<Msg, { t: 'script' }>) {
-    this.changed({ fetchingScript: false })
-    const want = this.host?.video ? (this.host.video.fp ?? this.host.video.title) : null
-    if (m.video !== want)
-      return
-    let loaded = 0
-    for (const a of m.axes) {
-      try {
-        if (this.ctx.scripts.load({ actions: unflatten(a.actions), axis: a.axis, name: a.name || `${a.axis}.funscript` }))
-          loaded++
-      }
-      catch (err) {
-        this.ctx.log('could not load an axis', a.axis, err)
-      }
-    }
-    if (!loaded) {
-      this.notice('Couldn\'t load their script. Open a video first, then try again.', 'warn')
-      return
-    }
-    this.changed({ follow: 'borrowed', notice: null })
-    this.ctx.ui.toast('Playing their script', { detail: `${loaded} axis${loaded === 1 ? '' : 'es'}, over your video`, tone: 'success' })
-    this.applyAll()
-  }
-
   private guestTick(t: number) {
     const m = this.host
     const s = this.ctx.player.state()
     const pos = this.ctx.player.clock()
     const prev = this.guestLook
     this.guestLook = { pos, at: t, playing: s.playing }
-    const following = this.view.follow === 'matched' || this.view.follow === 'borrowed'
+    const following = this.view.follow === 'matched'
     let drift: number | null = null
 
     if (m && following && prev) {

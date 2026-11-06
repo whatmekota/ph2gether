@@ -8,7 +8,7 @@ Needs playhound **2.0** or newer, on both sides.
 
 In playhound: **Settings → Plugins**. Install ph2gether from the plugin list there, then switch it on. To install by hand, download `ph2gether-<version>.zip` from [Releases](https://github.com/whatmekota/ph2gether/releases) and drop it on that page.
 
-It asks to see what plays, play and pause videos, read your library and scripts, and connect to the internet.
+It asks to see what plays, play and pause videos, read your library, and connect to the internet.
 
 ## Use it
 
@@ -24,19 +24,19 @@ A room takes two people; a third who tries the code is turned away. If the conne
 ### What follows what
 
 - The host leads: what plays, play and pause, seeks, playback speed. (Following the speed changes the guest's speed setting while you're together, and puts it back when you leave. **Match my partner's speed** in the settings turns it off.)
-- The guest's app finds the video by its content, not its name, so it doesn't matter what either of you called the file. If the guest doesn't have it, the panel says so and offers **Use their script**: the host's script plays over whatever video the guest has open, in step with the host. (playhound needs a video open to play a script, so the guest opens any one first. One at least as long as the host's works best.)
+- The guest's app finds the video by its content, not its name, so it doesn't matter what either of you called the file. If the guest doesn't have it, the panel says so on both sides: swap a link to it in the chat.
 - The guest drifting more than a quarter of a second gets put back in place. Pausing by hand puts the guest on hold rather than dragging them along; **Catch up** joins in again.
 - With **Let them control playback too** (host), the guest's play, pause and seek go to the host and from there to both.
 
 ### Safety stays yours
 
 - **Panic (Esc) stops your own device**, as always. It also tells your partner's app, which pauses their video and tells them you hit panic.
-- Nothing your partner sends reaches your device directly, and your speed limit, ranges and every other device setting stay yours. Their app can only play, pause and seek your video, and load a script when you ask for it.
+- Nothing your partner sends reaches your device directly, and your speed limit, ranges and every other device setting stay yours. Their app can only play, pause and seek your video, and send you chat messages (shown as plain text; links open in your browser).
 - If the connection drops, the guest's video pauses, so the device stops following.
 
 ## Privacy
 
-- **Your two apps talk directly**, over WebRTC, encrypted end to end (DTLS). Playback state, scripts and everything else go straight between you.
+- **Your two apps talk directly**, over WebRTC, encrypted end to end (DTLS). Playback state, chat and everything else go straight between you.
 - To find each other, the apps use **public signalling servers**: Nostr relays by default, or BitTorrent trackers or MQTT brokers (Settings → Plugins → ph2gether). They carry only the connection offers, and those are **encrypted with a key made from your room code**. They see a hash of the room, not the code; they don't see what you play. They do see your IP address and when you connect, as any server you talk to does.
 - **Public STUN servers** (Google, Cloudflare) tell each app its own public address, so they see your IP too.
 - **Your partner sees your IP address**: that's what a direct connection is.

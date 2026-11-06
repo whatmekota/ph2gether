@@ -1,5 +1,7 @@
+import type { ChatLine } from './chat'
 import type { Together, View } from './session'
 import type { PluginContext } from './types'
+import { CHAT_MAX, splitLinks } from './chat'
 import { EMOJI_NAMES, EMOJIS } from './emoji'
 import { strategyName } from './session'
 
@@ -46,20 +48,18 @@ function guestLine(v: View): { text: string, s: 'ok' | 'busy' | 'warn' | 'bad' }
     if (v.hold)
       return { text: v.hostPlaying ? 'You paused. Your partner is still playing.' : 'You\'re playing on your own. Your partner is paused.', s: 'warn' }
     switch (v.follow) {
-      case 'nothing': return { text: 'Your partner hasn\'t put anything on yet.', s: 'busy' }
-      case 'loading': return { text: `Putting on ${title}…`, s: 'busy' }
-      case 'missing': return { text: `Your partner is playing ${title} — you don't have it.`, s: 'warn' }
-      case 'borrowed': return { text: 'Playing their script over your video.', s: 'ok' }
-      case 'matched': return { text: 'In step with your partner.', s: 'ok' }
+      case 'nothing': return { text: 'Waiting for your partner to put a video on.', s: 'busy' }
+      case 'loading': return { text: `Opening ${title} here…`, s: 'busy' }
+      case 'missing': return { text: `You don't have ${title}. Ask for a link in the chat below.`, s: 'warn' }
+      case 'matched': return { text: 'You\'re in step: same video, same moment.', s: 'ok' }
     }
   }
   switch (v.guestStatus) {
     case null:
-    case 'nothing': return { text: v.video ? 'Your partner is getting ready…' : 'Put on a video: your partner\'s app follows.', s: 'busy' }
-    case 'loading': return { text: 'Your partner is putting it on…', s: 'busy' }
-    case 'matched': return { text: 'Your partner is in step.', s: 'ok' }
-    case 'missing': return { text: 'Your partner doesn\'t have this video. They can use your script.', s: 'warn' }
-    case 'borrowed': return { text: 'Your partner is playing your script over their own video.', s: 'ok' }
+    case 'nothing': return { text: v.video ? 'Your partner is getting ready…' : 'Play any video: your partner\'s app opens the same one.', s: 'busy' }
+    case 'loading': return { text: 'Your partner is opening it…', s: 'busy' }
+    case 'matched': return { text: 'You\'re in step: same video, same moment.', s: 'ok' }
+    case 'missing': return { text: 'Your partner doesn\'t have this video. Send them a link in the chat below.', s: 'warn' }
     case 'hold': return { text: 'Your partner paused on their side.', s: 'warn' }
     case 'panic': return { text: 'Your partner hit panic.', s: 'bad' }
   }
@@ -68,15 +68,17 @@ function guestLine(v: View): { text: string, s: 'ok' | 'busy' | 'warn' | 'bad' }
 /** What decides the layout; the rest is filled in place. */
 function shapeOf(v: View): string {
   const g = guestLine(v)
-  return JSON.stringify([v.phase, v.role, v.code, v.notice, v.emojis, v.verifiedHere, v.verifiedThere, v.control, v.video?.title, v.hostPlaying, g.text, v.fetchingScript, v.panicked])
+  return JSON.stringify([v.phase, v.role, v.code, v.notice, v.emojis, v.verifiedHere, v.verifiedThere, v.control, v.video?.title, v.hostPlaying, g.text, v.panicked])
 }
 
 export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): () => void {
   const root = h('div', { class: 'p2g' })
   el.append(root)
   let shape = ''
-  const live: { rtt?: HTMLElement, drift?: HTMLElement } = {}
+  const live: { rtt?: HTMLElement, drift?: HTMLElement, chat?: HTMLElement, chatIn?: HTMLInputElement } = {}
   let codeDraft = ''
+  let chatDraft = ''
+  t.panelsOpen++
 
   function render() {
     const v = t.view
@@ -86,8 +88,14 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
       const input = root.querySelector<HTMLInputElement>('.p2g-code-in')
       if (input)
         codeDraft = input.value
+      const hadFocus = document.activeElement === live.chatIn
+      if (live.chatIn)
+        chatDraft = live.chatIn.value
       root.replaceChildren(...build(v))
+      if (hadFocus)
+        live.chatIn?.focus()
     }
+    syncChat()
     if (live.rtt)
       live.rtt.textContent = v.rttMs === null ? '…' : `${v.rttMs} ms`
     if (live.drift)
@@ -109,6 +117,8 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
   function build(v: View): Node[] {
     live.rtt = undefined
     live.drift = undefined
+    live.chat = undefined
+    live.chatIn = undefined
     const kids = v.phase === 'idle' ? buildIdle(v) : v.phase === 'connected' ? buildConnected(v) : buildWaiting(v)
     return kids.filter((k): k is Node => k instanceof Node)
   }
@@ -213,10 +223,6 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
       h('div', { class: 'p2g-title' }, v.video ? v.video.title : 'Nothing yet', v.video && h('span', { class: 'p2g-fine' }, v.hostPlaying ? ' · playing' : ' · paused')),
       status,
     ]
-    if (v.role === 'guest' && v.follow === 'missing' && !v.hold) {
-      kids.push(h('button', { class: 'p2g-btn', disabled: v.fetchingScript, onclick: () => t.requestScript() }, v.fetchingScript ? 'Getting their script…' : 'Use their script'))
-      kids.push(h('p', { class: 'p2g-fine' }, 'Their script plays over the video you have open, in step with theirs.'))
-    }
     if (v.role === 'guest' && (v.hold || v.panicked))
       kids.push(h('button', { class: 'p2g-btn p2g-primary', disabled: v.panicked, onclick: () => t.catchUp() }, 'Catch up'))
     if (v.role === 'host') {
@@ -225,10 +231,72 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
       sw.addEventListener('change', () => t.setControl(sw.checked))
       kids.push(h('label', { class: 'p2g-switch' }, sw, 'Let them control playback too'))
     }
-    else if (v.control) {
-      kids.push(h('p', { class: 'p2g-fine' }, 'You can play, pause and seek for both of you.'))
-    }
     return h('div', { class: 'p2g-card' }, ...kids)
+  }
+
+  /** Chat, mostly for swapping links. Messages are text: links become anchors, nothing is parsed as HTML. */
+  function chatCard() {
+    live.chat = h('div', { 'class': 'p2g-chat-log', 'role': 'log', 'aria-live': 'polite', 'aria-label': 'Chat' })
+    const input = h('input', { 'class': 'p2g-in p2g-chat-in', 'type': 'text', 'maxlength': String(CHAT_MAX), 'placeholder': 'Message or a link to a video', 'aria-label': 'Message', 'value': chatDraft }) as HTMLInputElement
+    live.chatIn = input
+    const send = () => {
+      if (t.sendChat(input.value)) {
+        input.value = ''
+        chatDraft = ''
+      }
+      input.focus()
+    }
+    input.addEventListener('keydown', (e) => {
+      // Keys typed here are for the chat, not playhound's shortcuts.
+      e.stopPropagation()
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        send()
+      }
+    })
+    input.addEventListener('input', () => (chatDraft = input.value))
+    return h('div', { class: 'p2g-card' },
+      h('div', { class: 'p2g-label' }, 'Chat'),
+      live.chat,
+      h('div', { class: 'p2g-row' }, input, h('button', { class: 'p2g-btn', onclick: send }, 'Send')),
+    )
+  }
+
+  function chatLine(line: ChatLine) {
+    const body = h('div', { class: 'p2g-msg-text' })
+    for (const part of splitLinks(line.text)) {
+      if (part.kind === 'link')
+        body.append(h('a', { href: part.href, target: '_blank', rel: 'noopener noreferrer' }, part.text))
+      else
+        body.append(part.text)
+    }
+    return h('div', { 'class': 'p2g-msg', 'data-from': line.from },
+      h('span', { class: 'p2g-msg-who' }, line.from === 'me' ? 'You' : 'Partner'),
+      body,
+    )
+  }
+
+  /** Bring the log up to date in place: rebuilding it would lose the scroll position. */
+  function syncChat() {
+    const log = live.chat
+    if (!log)
+      return
+    const lines = t.chat
+    const shown = log.querySelectorAll('.p2g-msg').length
+    if (shown > lines.length || (lines.length && log.dataset.first !== String(lines[0].at)))
+      log.replaceChildren()
+    if (!lines.length) {
+      if (!log.childElementCount)
+        log.append(h('p', { class: 'p2g-fine p2g-chat-empty' }, 'Nothing yet. Paste a link to a video so your partner can get it too.'))
+      return
+    }
+    log.querySelector('.p2g-chat-empty')?.remove()
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 24
+    for (let i = log.querySelectorAll('.p2g-msg').length; i < lines.length; i++)
+      log.append(chatLine(lines[i]))
+    log.dataset.first = String(lines[0].at)
+    if (atBottom || lines.at(-1)?.from === 'me')
+      log.scrollTop = log.scrollHeight
   }
 
   function buildConnected(v: View): Kid[] {
@@ -236,12 +304,21 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
     return [
       h('div', { class: 'p2g-status' },
         h('i', { 'class': 'p2g-dot', 'data-s': 'ok' }),
-        h('span', { class: 'p2g-grow' }, v.role === 'host' ? 'Connected · you\'re hosting' : 'Connected · your partner is hosting'),
+        h('span', { class: 'p2g-grow' }, 'Connected'),
         live.rtt,
+      ),
+      h('div', { 'class': 'p2g-lead-box', 'data-role': v.role ?? '' },
+        h('b', {}, v.role === 'host' ? 'You lead' : 'Your partner leads'),
+        h('span', {}, v.role === 'host'
+          ? 'What you play opens on their side too, at the same moment.'
+          : v.control
+            ? 'Their video plays here, in step. You can also play, pause and seek for both of you.'
+            : 'Their video plays here, in step with theirs.'),
       ),
       noticeEl(v),
       verifyCard(v),
       playingCard(v),
+      chatCard(),
       h('p', { class: 'p2g-fine' }, 'Panic stops your own device, and pauses your partner\'s video. Your speed limit and ranges stay yours.'),
       h('div', { class: 'p2g-row p2g-end' }, h('code', { class: 'p2g-fine p2g-grow' }, v.code ?? ''), leaveBtn()),
     ]
@@ -251,6 +328,7 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
   render()
   return () => {
     off()
+    t.panelsOpen--
     root.remove()
   }
 }

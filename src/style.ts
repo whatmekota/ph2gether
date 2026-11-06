@@ -30,6 +30,18 @@ export const CSS = `
 .p2g-dot[data-s=busy] { background: var(--info); animation: p2g-pulse 1.4s ease-in-out infinite; }
 .p2g-dot[data-s=warn] { background: var(--warn); }
 .p2g-dot[data-s=bad] { background: var(--danger); }
+.p2g-lead-box { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: var(--radius-md, 10px); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 9%, var(--bg-850)); line-height: 1.4; }
+.p2g-lead-box b { color: var(--accent-light, var(--accent)); font-weight: 650; }
+.p2g-lead-box span { color: var(--text-muted); }
+.p2g-chat-log { display: flex; flex-direction: column; gap: 6px; max-height: 220px; min-height: 44px; overflow-y: auto; overscroll-behavior: contain; padding: 2px; }
+.p2g-chat-empty { padding: 4px 2px; }
+.p2g-msg { display: flex; flex-direction: column; gap: 1px; max-width: 88%; padding: 5px 9px 6px; border-radius: 10px; border-bottom-left-radius: 3px; background: var(--bg-800); align-self: flex-start; }
+.p2g-msg[data-from=me] { align-self: flex-end; background: color-mix(in srgb, var(--accent) 22%, var(--bg-800)); border-bottom-left-radius: 10px; border-bottom-right-radius: 3px; }
+.p2g-msg-who { font-size: 10.5px; font-weight: 600; color: var(--text-faint); }
+.p2g-msg[data-from=me] .p2g-msg-who { color: var(--accent-light, var(--accent)); text-align: right; }
+.p2g-msg-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.4; user-select: text; }
+.p2g-msg-text a { color: var(--accent-light, var(--accent)); text-decoration: underline; text-underline-offset: 2px; }
+.p2g-chat-in { font-family: inherit; }
 @keyframes p2g-pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .p2g-dot[data-s=busy] { animation: none; } }
 .p2g-card { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: var(--radius-md, 10px); background: var(--bg-850); border: 1px solid var(--border); }
