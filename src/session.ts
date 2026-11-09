@@ -153,6 +153,7 @@ export class Together {
   /** Where to take the knob back to once panic is lifted. */
   private knobAfterPanic: number | null = null
   private panicWatch: ReturnType<typeof setInterval> | null = null
+  private offResume: (() => void) | null = null
   // Theirs (controller side).
   private offerLimit = createWindow(RATE.asks, RATE.asksMs)
   /** Grants that ended here with the connection down: said to the partner when it comes back. */
@@ -357,6 +358,8 @@ export class Together {
     if (this.panicWatch)
       clearInterval(this.panicWatch)
     this.panicWatch = null
+    this.offResume?.()
+    this.offResume = null
   }
 
   // ─── Peers ──────────────────────────────────────────────────────────────
@@ -1108,12 +1111,8 @@ export class Together {
     const intensity = this.ctx.session.intensity
     const to = this.knob?.restoreTo(intensity.get(), why) ?? null
     this.knob = null
-    if (to !== null) {
-      if (this.ctx.safety.panicked())
-        this.restoreAfterPanic(to)
-      else
-        this.setKnob(to)
-    }
+    if (to !== null)
+      this.giveKnobBack(to)
     const name = this.partnerLabel
     if (why === 'lost')
       this.ctx.ui.toast('Lost your partner: you have control again', { detail: to === null ? 'Your settings stay as they are.' : 'Easing back to your own intensity.' })
@@ -1132,20 +1131,66 @@ export class Together {
     }
   }
 
-  /** While panic is on, playhound won't move the knob (not even down): wait, then lower it. */
-  private restoreAfterPanic(level: number) {
-    this.knobAfterPanic = level
-    this.panicWatch ??= setInterval(() => {
-      if (this.ctx.safety.panicked())
+  /**
+   * The knob back to `level`, where the owner had it (KnobWatch has already
+   * decided it should go back: the partner moved it, the owner didn't since,
+   * and after a panic only down).
+   *
+   * playhound 2.2's restore() goes back to the owner's own level even above
+   * the limit for plugins, and lowers at once during a panic. Its idea of
+   * "before" can be a level mid-way through an earlier move (a slider dragged
+   * faster than the knob ramps), and it gives up when a move hadn't finished;
+   * so what it says is checked against what we saw, and set() covers the rest.
+   * Older playhounds have no restore(), and move nothing during a panic: then
+   * the knob waits for the panic to be lifted.
+   */
+  private giveKnobBack(level: number) {
+    const intensity = this.ctx.session.intensity
+    if (typeof intensity.restore === 'function') {
+      let at: number | null = null
+      try {
+        at = intensity.restore()
+      }
+      catch (err) {
+        this.ctx.log('restore failed', err)
+      }
+      // The knob moves in whole percents: a right answer is the same one.
+      if (at !== null && Math.abs(at - level) < 0.005)
         return
+      this.ctx.log(`restore() went to ${at}; the owner had ${level}`)
+      // Off from what we saw: set() gets there, unless it's past the limit, where restore()'s is the best there is.
+      if (at === null || level <= intensity.max() + 0.001)
+        this.setKnob(level)
+      return
+    }
+    if (this.ctx.safety.panicked())
+      this.afterPanic(level)
+    else
+      this.setKnob(level)
+  }
+
+  /** An older playhound: the knob can't move during a panic. Lower it once the panic is lifted. */
+  private afterPanic(level: number) {
+    this.knobAfterPanic = level
+    const go = () => {
       const to = this.knobAfterPanic
       this.knobAfterPanic = null
+      this.offResume?.()
+      this.offResume = null
       if (this.panicWatch)
         clearInterval(this.panicWatch)
       this.panicWatch = null
       // Only ever down after a panic, and only if nobody turned it since.
       if (to !== null && to < this.ctx.session.intensity.get() - 0.005)
         this.setKnob(to)
+    }
+    if (typeof this.ctx.safety.onResume === 'function') {
+      this.offResume ??= this.ctx.safety.onResume(go)
+      return
+    }
+    this.panicWatch ??= setInterval(() => {
+      if (!this.ctx.safety.panicked())
+        go()
     }, 400)
   }
 
@@ -1203,11 +1248,8 @@ export class Together {
         break
       }
       case 'stroke': {
-        const st = this.ctx.player.state()
-        if (st.playing && st.hasScript) {
-          this.refuse(id, 'script')
-          break
-        }
+        // A script driving the stroke doesn't refuse it: the generator takes
+        // what's set and runs when the script stops; the remote says it waits.
         if (this.strokes && !this.strokes.active) {
           // The owner picked another motion source by hand: theirs now.
           this.refuse(id, 'owner')
@@ -1240,6 +1282,9 @@ export class Together {
           this.refuse(id, 'host')
           break
         }
+        // The Next key's own next (the queue, the auto-director) when playhound has it.
+        if (c.k === 'next' && typeof playback.next === 'function' && await playback.next().catch(() => false))
+          break
         const target = c.k === 'pick' ? this.libIds[c.i] : await this.nextVideo()
         if (!target || !(await playback.play(target).catch(() => false)))
           this.refuse(id, 'missing')
@@ -1259,7 +1304,7 @@ export class Together {
     }
   }
 
-  /** The scripted video after the one playing, in library order (playhound has no queue to skip in, for plugins). */
+  /** The scripted video after the one playing, in library order: when playhound has nothing next (or no playback.next). */
   private async nextVideo(): Promise<string | null> {
     const list = await this.scripted()
     if (!list.length)
@@ -1293,7 +1338,7 @@ export class Together {
       panic: this.ctx.safety.panicked(),
       title: st.title ? st.title.slice(0, 300) : null,
       playing: st.playing,
-      script: st.playing && st.hasScript,
+      script: typeof r.scriptDriving === 'boolean' ? r.scriptDriving : st.playing && st.hasScript,
       spm: Math.max(0, Math.min(600, Math.round(r.spm))),
       depth: r2(r.depth),
       maxSpm: Math.max(0, Math.min(600, Math.round(r.maxSpm))),

@@ -113,6 +113,20 @@ export interface PlayerSnapshot {
   hasScript: boolean
   /** The playback speed, 1 is normal (the one player.setRate sets). */
   rate: number
+  /** The picture's own size in pixels (API 3): 0 until the video has loaded, and for sound alone or a video playing elsewhere. Portrait when height > width. */
+  width: number
+  height: number
+}
+
+/** Where the picture is drawn in the player (player.picture), in CSS px from the player's top-left. */
+export interface PictureRect {
+  x: number
+  y: number
+  width: number
+  height: number
+  /** The player's own size: the picture is centred in it, letterboxed or pillarboxed. */
+  areaWidth: number
+  areaHeight: number
 }
 
 /** A video in the library, with what playhound knows about it. */
@@ -187,6 +201,12 @@ export interface MotionReadout {
   phase: number | null
   /** Milliseconds until the generator's stroke is next at the bottom (where a beat lands); null while it isn't stroking. */
   nextStrokeInMs: number | null
+  /**
+   * A script is playing and drives the stroke: the generator (motion.take)
+   * waits until it stops, since the two never fight over the same axis.
+   * What a plugin sets meanwhile applies when the script stops.
+   */
+  scriptDriving: boolean
 }
 
 /** The stroke generator, while a plugin holds it. */
@@ -529,6 +549,16 @@ export interface PluginContext {
      * a second). For keeping something in step with the picture.
      */
     clock: () => number
+    /**
+     * Where the picture is drawn in the player right now (API 3), in CSS px
+     * from the player's top-left, with the player's size: a portrait video is
+     * pillarboxed, a wide one letterboxed. Null with no picture (sound alone,
+     * a video playing elsewhere, nothing loaded). An overlay can also use the
+     * CSS variables --ph-picture-left / -top / -width / -height.
+     */
+    picture: () => PictureRect | null
+    /** The picture moved or changed size (a new video, a resize, fullscreen, the pop-out). Returns an unsubscribe. */
+    onPicture: (fn: (r: PictureRect | null) => void) => () => void
     /** Jump to `t` seconds. False with nothing loaded. */
     seek: (t: number) => boolean
     /** Set the playback speed (0.1–10, 1 is normal). It is the user's speed: the player shows it and keeps it. */
@@ -586,6 +616,10 @@ export interface PluginContext {
     onEnded: (fn: (id: string | null) => void) => () => void
     /** Play the library video with this fingerprint (see library.fingerprint). False if there is none. */
     playFingerprint: (fp: string) => Promise<boolean>
+    /** What the Next key does: the next in the queue (or the auto-director's pick). False if there is nothing next. */
+    next: () => Promise<boolean>
+    /** What the Previous key does. False if there is nothing before. */
+    previous: () => Promise<boolean>
     /**
      * Follow a video that plays in another app, a VR headset (permission
      * `external`): its scripts play on every device to the clock you feed
@@ -632,6 +666,8 @@ export interface PluginContext {
     panicked: () => boolean
     /** Panic (Esc) fired: stop talking, stop moving. Control was already released. */
     onPanic: (fn: () => void) => () => void
+    /** Panic was lifted (the user pressed it again). Nothing restarts by itself: take control again if you need it. */
+    onResume: (fn: () => void) => () => void
   }
   net: {
     /**
@@ -689,8 +725,18 @@ export interface PluginContext {
        * a second up), never past the limit the user set for plugins.
        * Returns where it will stop. The user turning the knob, or panic,
        * stops the move. The user sees a notice saying which plugin did it.
+       * During a panic it may only lower the knob (at once, nothing moves
+       * then anyway).
        */
       set: (level: number) => number
+      /**
+       * Put the knob back where it was before this plugin first moved it
+       * (since its last restore), even above the plugin limit, since that
+       * was the user's own level. Ramps like set(); after a panic it only
+       * goes down. Returns where it will stop, or null when this plugin
+       * hasn't moved it (or the user has turned it since).
+       */
+      restore: () => number | null
       /** The most a plugin may set, as the user chose in Settings → Plugins. */
       max: () => number
       /** The knob moved, by anyone. Returns an unsubscribe. */

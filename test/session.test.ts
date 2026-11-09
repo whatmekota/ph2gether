@@ -10,20 +10,35 @@ import { Together } from '../src/session.ts'
  * other end of the link.
  */
 
-function fakeApp() {
+/**
+ * `core: 'new'` is playhound 2.2 as it shipped (intensity.restore, lowering
+ * during a panic, safety.onResume, playback.next, readout.scriptDriving);
+ * 'old' is the API 3 before those.
+ */
+function fakeApp(core: 'new' | 'old' = 'new') {
   const calls: string[] = []
   const app = {
     level: 0.4,
     max: 0.8,
     panicked: false,
     knobFns: new Set<(v: number) => void>(),
+    resumeFns: new Set<() => void>(),
     motion: null as null | { active: boolean, spm: number, depth: number },
     playing: false,
     hasScript: false,
+    /** Like core: where the knob was before this plugin first moved it, and where it last sent it. */
+    mark: null as null | { level: number, left: number },
+    /** Make restore() answer this instead (to stand for core's own idea of "before"). */
+    restoreSays: undefined as undefined | number | null,
+    nextSays: false,
   }
   const setLevel = (v: number) => {
     app.level = v
     for (const f of app.knobFns) f(v)
+  }
+  const lift = () => {
+    app.panicked = false
+    for (const f of app.resumeFns) f()
   }
   const ctx = {
     settings: { get: () => undefined, set: () => {}, all: () => ({}), onChange: () => () => {} },
@@ -38,15 +53,45 @@ function fakeApp() {
       intensity: {
         get: () => app.level,
         max: () => app.max,
-        // Like playhound: held to the limit, refused while panicked (here it lands at once).
-        set: (v: number) => {
+        // Like playhound: held to the limit (here it lands at once). During a
+        // panic, the old core moves nothing; the new one lowers only.
+        set: (v: number, ceiling = app.max) => {
           calls.push(`set:${v}`)
-          if (app.panicked)
+          const to = Math.max(0.1, Math.min(ceiling, v))
+          if (core === 'new') {
+            if (!app.mark || Math.abs(app.level - app.mark.left) > 0.004)
+              app.mark = { level: app.level, left: to }
+            else
+              app.mark.left = to
+          }
+          if (app.panicked) {
+            if (core === 'new' && to < app.level)
+              setLevel(to)
             return app.level
-          const to = Math.max(0.1, Math.min(app.max, v))
+          }
           setLevel(to)
           return to
         },
+        ...(core === 'new'
+          ? {
+              restore: () => {
+                calls.push('restore')
+                const mark = app.mark
+                app.mark = null
+                if (app.restoreSays !== undefined) {
+                  if (app.restoreSays !== null)
+                    setLevel(app.restoreSays)
+                  return app.restoreSays
+                }
+                if (!mark || Math.abs(app.level - mark.left) > 0.004)
+                  return null
+                if (app.panicked && mark.level > app.level)
+                  return app.level
+                setLevel(mark.level)
+                return mark.level
+              },
+            }
+          : {}),
         onChange: (fn: (v: number) => void) => {
           app.knobFns.add(fn)
           return () => app.knobFns.delete(fn)
@@ -78,23 +123,48 @@ function fakeApp() {
           },
         }
       },
-      readout: () => ({ spm: app.motion?.spm ?? 0, depth: app.motion?.depth ?? 0, pos: 0, maxSpm: 150, device: false, phase: null, nextStrokeInMs: null }),
+      readout: () => ({
+        spm: app.motion?.spm ?? 0,
+        depth: app.motion?.depth ?? 0,
+        pos: 0,
+        maxSpm: 150,
+        device: false,
+        phase: null,
+        nextStrokeInMs: null,
+        ...(core === 'new' ? { scriptDriving: app.playing && app.hasScript } : {}),
+      }),
     },
     player: {
       state: () => ({ playing: app.playing, title: 'a.mp4', time: 0, duration: 60, hasScript: app.hasScript, rate: 1 }),
       clock: () => 0,
       onChange: () => () => {},
     },
-    safety: { panicked: () => app.panicked, onPanic: () => () => {} },
-    playback: { pause: () => calls.push('pause'), resume: () => calls.push('resume'), play: async (id: string) => (calls.push(`play:${id}`), true) },
+    safety: {
+      panicked: () => app.panicked,
+      onPanic: () => () => {},
+      ...(core === 'new'
+        ? {
+            onResume: (fn: () => void) => {
+              app.resumeFns.add(fn)
+              return () => app.resumeFns.delete(fn)
+            },
+          }
+        : {}),
+    },
+    playback: {
+      pause: () => calls.push('pause'),
+      resume: () => calls.push('resume'),
+      play: async (id: string) => (calls.push(`play:${id}`), true),
+      ...(core === 'new' ? { next: async () => (calls.push('next'), app.nextSays) } : {}),
+    },
     library: { list: async () => [{ id: 'a.mp4', title: 'a', hasScript: true, durationS: 60 }, { id: 'b.mp4', title: 'b', hasScript: true, durationS: 90 }, { id: 'c.mp4', title: 'c', hasScript: false, durationS: 5 }] },
   } as unknown as PluginContext
-  return { app, ctx, calls, setLevel }
+  return { app, ctx, calls, setLevel, lift }
 }
 
 /** A Together connected to a partner, in a verified room, both on partner control. */
-function connected(role: 'host' | 'guest' = 'host') {
-  const f = fakeApp()
+function connected(role: 'host' | 'guest' = 'host', core: 'new' | 'old' = 'new') {
+  const f = fakeApp(core)
   const t = new Together(f.ctx)
   const sent: Msg[] = []
   const any = t as any
@@ -188,7 +258,7 @@ test('the owner turning the knob: it stays where they put it', () => {
   assert.equal(c.app.level, 0.2)
 })
 
-test('panic takes it back at once; the knob comes down once panic is lifted', async () => {
+test('panic takes it back at once, and the knob comes down at once', () => {
   const c = connected()
   const id = grant(c, ['intensity', 'stroke'])
   c.recv({ t: 'pcCmd', id, c: { k: 'level', v: 0.75 } })
@@ -197,13 +267,72 @@ test('panic takes it back at once; the knob comes down once panic is lifted', as
   assert.equal(c.t.view.mine.p, 'off')
   assert.ok(c.sent.some(m => m.t === 'pcEnd' && m.why === 'panic'))
   assert.ok(c.sent.some(m => m.t === 'panic'))
-  // playhound refuses to move the knob while panicked…
+  assert.ok(c.calls.includes('restore'))
+  assert.equal(c.app.level, 0.4)
+})
+
+test('panic after the partner lowered the knob: it stays down', () => {
+  const c = connected()
+  const id = grant(c, ['intensity'])
+  c.recv({ t: 'pcCmd', id, c: { k: 'level', v: 0.2 } })
+  c.app.panicked = true
+  c.t.onLocalPanic()
+  assert.equal(c.app.level, 0.2)
+  c.lift()
+  assert.equal(c.app.level, 0.2)
+})
+
+test('an older playhound: during a panic the knob waits, and comes down once panic is lifted', async () => {
+  const c = connected('host', 'old')
+  const id = grant(c, ['intensity', 'stroke'])
+  c.recv({ t: 'pcCmd', id, c: { k: 'level', v: 0.75 } })
+  c.app.panicked = true
+  c.t.onLocalPanic()
+  assert.equal(c.t.view.mine.p, 'off')
+  // That playhound refuses to move the knob while panicked…
   assert.equal(c.app.level, 0.75)
   c.app.panicked = false
   await new Promise(r => setTimeout(r, 500))
   // …so it comes down after.
   assert.equal(c.app.level, 0.4)
   c.t.dispose()
+})
+
+test('an older playhound: take back sets the saved level itself', () => {
+  const c = connected('host', 'old')
+  const id = grant(c, ['intensity'])
+  c.recv({ t: 'pcCmd', id, c: { k: 'level', v: 0.75 } })
+  c.t.takeBack()
+  assert.equal(c.app.level, 0.4)
+  assert.ok(!c.calls.includes('restore'))
+})
+
+test('restore() gives back a level above the limit for plugins', () => {
+  const c = connected()
+  c.app.level = 1
+  const id = grant(c, ['intensity'])
+  c.recv({ t: 'pcCmd', id, c: { k: 'level', v: 0.5 } })
+  assert.equal(c.app.level, 0.5)
+  c.t.takeBack()
+  assert.equal(c.app.level, 1)
+})
+
+test('restore() saying no while a move was under way: set() covers it', () => {
+  const c = connected()
+  const id = grant(c, ['intensity'])
+  c.recv({ t: 'pcCmd', id, c: { k: 'level', v: 0.75 } })
+  c.app.restoreSays = null
+  c.t.takeBack()
+  assert.equal(c.app.level, 0.4)
+})
+
+test('restore() going back to a level mid-way through a move: corrected to the owner\'s own', () => {
+  const c = connected()
+  const id = grant(c, ['intensity'])
+  c.recv({ t: 'pcCmd', id, c: { k: 'level', v: 0.75 } })
+  c.app.restoreSays = 0.55
+  c.t.takeBack()
+  assert.equal(c.app.level, 0.4)
 })
 
 test('the partner\'s panic ends control both ways', () => {
@@ -236,18 +365,40 @@ test('asks are limited too', () => {
   assert.equal(c.sent.filter(m => m.t === 'pcEnd' && m.why === 'no').length, 3)
 })
 
-test('strokes wait while a script plays', () => {
-  const c = connected()
-  const id = grant(c, ['stroke'])
-  c.app.playing = true
-  c.app.hasScript = true
-  c.recv({ t: 'pcCmd', id, c: { k: 'stroke', spm: 90, depth: 0.6 } })
-  assert.ok(!c.calls.includes('take'))
-  assert.ok(c.sent.some(m => m.t === 'pcNo' && m.why === 'script'))
+test('strokes wait while a script plays, and the remote is told', () => {
+  for (const core of ['new', 'old'] as const) {
+    const c = connected('host', core)
+    const id = grant(c, ['stroke'])
+    c.app.playing = true
+    c.app.hasScript = true
+    c.recv({ t: 'pcCmd', id, c: { k: 'stroke', spm: 90, depth: 0.6 } })
+    // Taken and set: it runs when the script stops.
+    assert.equal(c.app.motion?.spm, 90, core)
+    c.any.liveSig = ''
+    c.any.liveAt = -1e9
+    c.any.sendLive(performance.now())
+    const live = c.sent.filter(m => m.t === 'pcLive').at(-1)
+    assert.equal(live && live.t === 'pcLive' && live.s.script, true, core)
+  }
 })
 
-test('picking what plays: next, and from the list sent', async () => {
+test('next: playhound\'s own Next first, the library order when it has nothing', async () => {
   const c = connected('host')
+  const id = grant(c, ['playback'])
+  c.app.nextSays = true
+  c.recv({ t: 'pcCmd', id, c: { k: 'next' } })
+  await flush()
+  assert.ok(c.calls.includes('next'))
+  assert.ok(!c.calls.some(x => x.startsWith('play:')))
+  c.app.nextSays = false
+  c.any.gate = new (c.any.gate.constructor)()
+  c.recv({ t: 'pcCmd', id, c: { k: 'next' } })
+  await flush()
+  assert.ok(c.calls.includes('play:b.mp4'))
+})
+
+test('picking what plays (older playhound): next, and from the list sent', async () => {
+  const c = connected('host', 'old')
   const id = grant(c, ['playback'])
   await flush()
   const lib = c.sent.find(m => m.t === 'pcLib')
