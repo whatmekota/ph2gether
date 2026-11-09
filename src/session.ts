@@ -1137,12 +1137,14 @@ export class Together {
    * and after a panic only down).
    *
    * playhound 2.2's restore() goes back to the owner's own level even above
-   * the limit for plugins, and lowers at once during a panic. Its idea of
-   * "before" can be a level mid-way through an earlier move (a slider dragged
-   * faster than the knob ramps), and it gives up when a move hadn't finished;
-   * so what it says is checked against what we saw, and set() covers the rest.
-   * Older playhounds have no restore(), and move nothing during a panic: then
-   * the knob waits for the panic to be lifted.
+   * the limit for plugins, and lowers at once during a panic. Pre-release
+   * 2.2 builds could answer with a level mid-way through an earlier move (a
+   * slider dragged faster than the knob ramps), or null while a move was
+   * under way; the API doesn't say which build it is, so what restore() says
+   * is checked against what we saw, and set() covers the rest. On a release
+   * the two agree and the check does nothing. Older playhounds have no
+   * restore(), and move nothing during a panic: then the knob waits for the
+   * panic to be lifted.
    */
   private giveKnobBack(level: number) {
     const intensity = this.ctx.session.intensity
@@ -1157,7 +1159,6 @@ export class Together {
       // The knob moves in whole percents: a right answer is the same one.
       if (at !== null && Math.abs(at - level) < 0.005)
         return
-      this.ctx.log(`restore() went to ${at}; the owner had ${level}`)
       // Off from what we saw: set() gets there, unless it's past the limit, where restore()'s is the best there is.
       if (at === null || level <= intensity.max() + 0.001)
         this.setKnob(level)
