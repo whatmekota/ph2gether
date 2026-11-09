@@ -1,12 +1,14 @@
 import type { ChatLine } from './chat'
+import type { CtlEvent, CtlState, OwnerEvent, OwnerState, Step } from './control'
 import type { Link } from './net'
-import type { GuestState, Msg, Role, StateMsg, VideoRef } from './protocol'
+import type { Cmd, EndWhy, GuestState, LibItem, Live, Msg, NoWhy, Power, Role, StateMsg, VideoRef } from './protocol'
 import type { RoomCode, Strategy } from './room'
-import type { PluginContext } from './types'
+import type { MotionControl, PluginContext } from './types'
 import { CHAT_KEEP, cleanChat, createRateLimit } from './chat'
+import { CmdGate, cmdAllowed, createWindow, ctlStep, KnobWatch, newGrantId, ownerStep, powersText, RATE } from './control'
 import { sasEmojis, sdpFingerprint } from './emoji'
 import { openLink } from './net'
-import { PROTOCOL } from './protocol'
+import { cleanName, CONTROL_VERSION, POWERS, PROTOCOL } from './protocol'
 import { deriveRoom, makeCode, parseCode, STRATEGIES } from './room'
 import { ClockSync, clockSample, correction, hostPositionAt, jumped, SYNC } from './sync'
 
@@ -51,6 +53,31 @@ export interface View {
   /** Guest − host, seconds, as last measured. */
   driftS: number | null
   panicked: boolean
+  /** Partner control: the version both apps speak; 0 when the partner's app doesn't have it. */
+  pc: number
+  /** What the partner calls themselves, if they said. */
+  partnerName: string | null
+  /** My session: do I let them? */
+  mine: OwnerState
+  /** Theirs: do they let me? */
+  theirs: CtlState
+  /** Their session as they last sent it, while I control it. */
+  their: Live | null
+  /** Their scripted videos, while I may pick what plays. */
+  lib: LibItem[] | null
+  /** The last command of mine they didn't carry out, and when. */
+  refused: { why: NoWhy, at: number } | null
+}
+
+/** A refused command, in words. */
+export const NO_TEXT: Record<NoWhy, string> = {
+  rate: 'Too fast: slow down a little.',
+  power: 'They didn\'t give you that.',
+  panic: 'Panic is on at their end.',
+  script: 'A script is playing at their end: strokes wait until it stops.',
+  owner: 'They took the strokes back by hand.',
+  missing: 'That video isn\'t there any more.',
+  host: 'Only the host picks what plays.',
 }
 
 const STRATEGY_NAMES: Record<Strategy, string> = { nostr: 'Nostr relays', torrent: 'BitTorrent trackers', mqtt: 'MQTT brokers' }
@@ -113,6 +140,24 @@ export class Together {
   private lastHeardAt = 0
   private stale = false
 
+  // Partner control: my session (owner side).
+  private askLimit = createWindow(RATE.asks, RATE.asksMs)
+  private gate = new CmdGate()
+  private knob: KnobWatch | null = null
+  private knobOff: (() => void) | null = null
+  private strokes: MotionControl | null = null
+  private libIds: string[] = []
+  private liveSig = ''
+  private liveAt = 0
+  private noAt = new Map<string, number>()
+  /** Where to take the knob back to once panic is lifted. */
+  private knobAfterPanic: number | null = null
+  private panicWatch: ReturnType<typeof setInterval> | null = null
+  // Theirs (controller side).
+  private offerLimit = createWindow(RATE.asks, RATE.asksMs)
+  /** Grants that ended here with the connection down: said to the partner when it comes back. */
+  private lostEnds: Msg[] = []
+
   view: View = this.blank()
   /** The panel should put the cursor in the code box (the Join command). */
   focusJoin = false
@@ -138,6 +183,13 @@ export class Together {
       guestStatus: null,
       driftS: null,
       panicked: false,
+      pc: 0,
+      partnerName: null,
+      mine: { p: 'off' },
+      theirs: { p: 'off' },
+      their: null,
+      lib: null,
+      refused: null,
     }
   }
 
@@ -259,6 +311,10 @@ export class Together {
     if (this.view.phase === 'idle')
       return
     this.generation++
+    // Control ends first, with a word to the partner, and the knob eases back.
+    this.mineStep({ e: 'off' })
+    this.theirsStep({ e: 'off' })
+    this.lostEnds = []
     if (this.partner)
       this.link?.send({ t: 'bye' }, this.partner)
     const link = this.link
@@ -298,6 +354,9 @@ export class Together {
   dispose() {
     void this.leave()
     this.updateFns.clear()
+    if (this.panicWatch)
+      clearInterval(this.panicWatch)
+    this.panicWatch = null
   }
 
   // ─── Peers ──────────────────────────────────────────────────────────────
@@ -308,7 +367,8 @@ export class Together {
   }
 
   private hello(id: string) {
-    this.link?.send({ t: 'hello', v: PROTOCOL, role: this.view.role!, app: VERSION }, id)
+    const name = cleanName(this.ctx.settings.get<string>('name'))
+    this.link?.send({ t: 'hello', v: PROTOCOL, role: this.view.role!, app: VERSION, pc: CONTROL_VERSION, ...(name ? { name } : {}) }, id)
   }
 
   /**
@@ -324,6 +384,8 @@ export class Together {
   private onPeerLeave(id: string) {
     if (id !== this.partner)
       return
+    // Before the partner is gone: control ends, here and now.
+    this.controlLost()
     this.partner = null
     this.clock.reset()
     this.pingsSent = 0
@@ -392,6 +454,11 @@ export class Together {
       this.stale = false
       this.resync = true
       this.changed({ phase: 'connected', notice: null })
+      this.sayLostEnds()
+    }
+    if (m.t.startsWith('pc')) {
+      this.onControlMsg(m)
+      return
     }
     switch (m.t) {
       case 'bye':
@@ -411,6 +478,9 @@ export class Together {
         this.verifiedKey.there = this.sasKey
         break
       case 'panic':
+        // Panic ends control both ways, whoever hit it.
+        this.mineStep({ e: 'panic' })
+        this.theirsStep({ e: 'panic' })
         this.ourPause()
         if (this.view.role === 'guest')
           this.view.hold = true
@@ -462,7 +532,10 @@ export class Together {
     this.stale = false
     this.connectedAt = now()
     this.resync = true
-    this.changed({ phase: 'connected', notice: null })
+    // Partner control: the lower of the two versions; none if theirs predates it.
+    const pc = Math.min(CONTROL_VERSION, m.pc ?? 0)
+    this.changed({ phase: 'connected', notice: null, pc, partnerName: m.name ?? null, mine: { p: 'off' }, theirs: { p: 'off' }, their: null, lib: null, refused: null })
+    this.sayLostEnds()
     void this.checkEmojis()
     this.pingNow()
     if (this.view.role === 'host')
@@ -517,6 +590,7 @@ export class Together {
     const t = now()
     if (!this.stale && t - this.lastHeardAt > SYNC.staleMs) {
       this.stale = true
+      this.controlLost()
       // Nothing to follow: stop, so the device stops too.
       if (this.view.role === 'guest')
         this.ourPause()
@@ -532,6 +606,11 @@ export class Together {
       this.hostTick(t)
     else
       this.guestTick(t)
+    if (this.view.mine.p === 'granted' && !this.stale) {
+      for (const c of this.gate.due(t))
+        void this.apply(c)
+      this.sendLive(t)
+    }
   }
 
   // ─── Host ───────────────────────────────────────────────────────────────
@@ -806,11 +885,433 @@ export class Together {
 
   // ─── Safety ─────────────────────────────────────────────────────────────
 
-  /** Panic here: playhound already stopped this device. Tell the partner, so they pause too. */
+  /**
+   * Panic here: playhound already stopped this device and let go of the
+   * stroke generator. Control ends both ways, at once; then the partner hears
+   * of it and pauses too.
+   */
   onLocalPanic() {
+    this.mineStep({ e: 'panic' })
+    this.theirsStep({ e: 'panic' })
     if (this.partner)
       this.send({ t: 'panic' })
     if (this.view.role === 'guest')
       this.changed({ hold: true, panicked: true })
+  }
+
+  // ─── Partner control ────────────────────────────────────────────────────
+
+  /** Both tapped "They match" for this connection. */
+  get verified(): boolean {
+    return this.view.verifiedHere && this.view.verifiedThere
+  }
+
+  /** What I can hand over now: picking what plays only while I host (the host leads what plays). */
+  grantable(): Power[] {
+    return POWERS.filter(p => p !== 'playback' || this.view.role === 'host')
+  }
+
+  /** Control can be asked for or offered: connected, both apps have it, the room verified. */
+  controlReady(): boolean {
+    return this.view.phase === 'connected' && !this.stale && this.view.pc >= 1 && this.verified
+  }
+
+  get partnerLabel(): string {
+    return this.view.partnerName ?? 'Your partner'
+  }
+
+  // My session.
+  offerControl(powers: Power[]) {
+    this.mineStep({ e: 'offer', powers })
+  }
+
+  allowControl(powers: Power[]) {
+    this.mineStep({ e: 'allow', powers })
+  }
+
+  refuseControl() {
+    this.mineStep({ e: 'refuse' })
+  }
+
+  withdrawOffer() {
+    this.mineStep({ e: 'withdraw' })
+  }
+
+  /** One click, always: control of my session comes back to me. */
+  takeBack() {
+    this.mineStep({ e: 'takeBack' })
+  }
+
+  // Theirs.
+  askControl(powers: Power[]) {
+    this.theirsStep({ e: 'ask', powers })
+  }
+
+  acceptOffer() {
+    this.theirsStep({ e: 'accept' })
+  }
+
+  passOffer() {
+    this.theirsStep({ e: 'pass' })
+  }
+
+  cancelAsk() {
+    this.theirsStep({ e: 'cancel' })
+  }
+
+  letGo() {
+    this.theirsStep({ e: 'letGo' })
+  }
+
+  /** Send a command to the partner whose session I control. False if I don't. */
+  command(c: Cmd): boolean {
+    const s = this.view.theirs
+    if (s.p !== 'granted' || !this.partner || this.stale)
+      return false
+    this.send({ t: 'pcCmd', id: s.id, c })
+    return true
+  }
+
+  private applyStep<S>(r: Step<S>) {
+    for (const m of r.send)
+      this.send(m)
+    if (r.note) {
+      this.notice(r.note, 'info')
+      if (!this.panelsOpen)
+        this.ctx.ui.toast(r.note, { detail: 'Together' })
+    }
+  }
+
+  private mineStep(ev: OwnerEvent) {
+    const before = this.view.mine
+    const r = ownerStep(before, ev, { verified: this.verified, allowed: this.grantable(), newId: newGrantId })
+    if (r.s === before && !r.send.length && !r.note)
+      return
+    this.applyStep(r)
+    this.changed({ mine: r.s })
+    if (r.began && r.s.p === 'granted')
+      this.beginOwned(r.s.powers)
+    if (r.ended) {
+      if (r.ended === 'lost' && before.p === 'granted')
+        this.lostEnds.push({ t: 'pcEnd', id: before.id, why: 'off' })
+      this.endOwned(r.ended)
+    }
+  }
+
+  private theirsStep(ev: CtlEvent) {
+    const before = this.view.theirs
+    const r = ctlStep(before, ev, { verified: this.verified })
+    if (r.s === before && !r.send.length && !r.note)
+      return
+    this.applyStep(r)
+    const patch: Partial<View> = { theirs: r.s }
+    if (r.began || r.s.p !== 'granted')
+      Object.assign(patch, { their: null, lib: null, refused: null })
+    this.changed(patch)
+    if (r.ended === 'lost' && before.p === 'granted')
+      this.lostEnds.push({ t: 'pcStop', id: before.id, why: 'off' })
+    if (r.ended === 'lost')
+      this.ctx.ui.toast('Lost your partner', { detail: 'Your control of their session ended.' })
+  }
+
+  /** The connection is gone (or went quiet): control ends both ways, without a word (none can go). */
+  private controlLost() {
+    this.mineStep({ e: 'lost' })
+    this.theirsStep({ e: 'lost' })
+  }
+
+  /** The connection is back: say which grants ended while it was down, in case the partner didn't notice. */
+  private sayLostEnds() {
+    for (const m of this.lostEnds)
+      this.send(m)
+    this.lostEnds = []
+  }
+
+  private onControlMsg(m: Msg) {
+    // Their app doesn't speak it (or says it doesn't): ignore it all.
+    if (this.view.pc < 1)
+      return
+    const t = now()
+    switch (m.t) {
+      // About my session.
+      case 'pcAsk':
+        if (!this.askLimit(t))
+          return
+        this.mineStep({ e: 'ask', powers: m.powers })
+        if (this.view.mine.p === 'asked' && !this.panelsOpen)
+          this.ctx.ui.toast(`${this.partnerLabel} asks to control your session`, { detail: 'Open Together to answer.' })
+        return
+      case 'pcAccept':
+        return this.mineStep({ e: 'accept' })
+      case 'pcStop':
+        return this.mineStep({ e: 'stop', why: m.why, id: m.id })
+      case 'pcCmd':
+        return this.onCmd(m.id, m.c)
+      // About theirs.
+      case 'pcOffer':
+        if (!this.offerLimit(t))
+          return
+        this.theirsStep({ e: 'offer', powers: m.powers })
+        if (this.view.theirs.p === 'offered' && !this.panelsOpen)
+          this.ctx.ui.toast(`${this.partnerLabel} offers you control of their session`, { detail: 'Open Together to take it.' })
+        return
+      case 'pcGrant':
+        this.theirsStep({ e: 'grant', id: m.id, powers: m.powers })
+        if (this.view.theirs.p === 'granted' && !this.panelsOpen)
+          this.ctx.ui.toast(`You have control of ${this.view.partnerName ?? 'your partner'}'s session`, { detail: powersText(m.powers) })
+        return
+      case 'pcEnd':
+        return this.theirsStep({ e: 'end', why: m.why, id: m.id })
+      case 'pcLive':
+      case 'pcLib':
+      case 'pcNo': {
+        const s = this.view.theirs
+        if (s.p !== 'granted' || s.id !== m.id)
+          return
+        if (m.t === 'pcLive')
+          this.changed({ their: m.s })
+        else if (m.t === 'pcLib')
+          this.changed({ lib: m.items })
+        else
+          this.changed({ refused: { why: m.why, at: Date.now() } })
+      }
+    }
+  }
+
+  // ─── My session, while my partner holds control ───
+
+  private beginOwned(powers: Power[]) {
+    const intensity = this.ctx.session.intensity
+    this.knob = new KnobWatch(intensity.get())
+    this.knobOff?.()
+    this.knobOff = intensity.onChange(v => this.knob?.seen(v))
+    this.knobAfterPanic = null
+    this.gate = new CmdGate()
+    this.liveSig = ''
+    this.liveAt = 0
+    this.sendLive(now())
+    if (powers.includes('playback'))
+      void this.sendLib()
+  }
+
+  private endOwned(why: EndWhy | 'lost') {
+    this.gate.clear()
+    this.knobOff?.()
+    this.knobOff = null
+    // The generator goes back to the owner's settings, stopped.
+    try {
+      this.strokes?.release()
+    }
+    catch {}
+    this.strokes = null
+    this.libIds = []
+    const intensity = this.ctx.session.intensity
+    const to = this.knob?.restoreTo(intensity.get(), why) ?? null
+    this.knob = null
+    if (to !== null) {
+      if (this.ctx.safety.panicked())
+        this.restoreAfterPanic(to)
+      else
+        this.setKnob(to)
+    }
+    const name = this.partnerLabel
+    if (why === 'lost')
+      this.ctx.ui.toast('Lost your partner: you have control again', { detail: to === null ? 'Your settings stay as they are.' : 'Easing back to your own intensity.' })
+    else if (why === 'given')
+      this.ctx.ui.toast(`${name} gave you control back`)
+    else if (why === 'panic')
+      this.ctx.ui.toast('Panic: you have control again')
+  }
+
+  private setKnob(level: number) {
+    try {
+      this.ctx.session.intensity.set(level)
+    }
+    catch (err) {
+      this.ctx.log('could not set the intensity', err)
+    }
+  }
+
+  /** While panic is on, playhound won't move the knob (not even down): wait, then lower it. */
+  private restoreAfterPanic(level: number) {
+    this.knobAfterPanic = level
+    this.panicWatch ??= setInterval(() => {
+      if (this.ctx.safety.panicked())
+        return
+      const to = this.knobAfterPanic
+      this.knobAfterPanic = null
+      if (this.panicWatch)
+        clearInterval(this.panicWatch)
+      this.panicWatch = null
+      // Only ever down after a panic, and only if nobody turned it since.
+      if (to !== null && to < this.ctx.session.intensity.get() - 0.005)
+        this.setKnob(to)
+    }, 400)
+  }
+
+  private refuse(id: string, why: NoWhy) {
+    // One of each a second at most: a flood of commands isn't answered with a flood.
+    const t = now()
+    if (t - (this.noAt.get(why) ?? -1e9) < 1000)
+      return
+    this.noAt.set(why, t)
+    this.send({ t: 'pcNo', id, why })
+  }
+
+  private onCmd(id: string, c: Cmd) {
+    const s = this.view.mine
+    const ok = cmdAllowed(s, id, c, this.verified)
+    if (ok === 'stale') {
+      // An old grant (it ended while the connection was down): say it's over.
+      if (s.p !== 'granted' && now() - (this.noAt.get('stale') ?? -1e9) > 1000) {
+        this.noAt.set('stale', now())
+        this.send({ t: 'pcEnd', id, why: 'off' })
+      }
+      return
+    }
+    if (ok === 'power')
+      return this.refuse(id, 'power')
+    if (this.ctx.safety.panicked())
+      return this.refuse(id, 'panic')
+    const when = this.gate.take(c, now())
+    if (when === 'rate')
+      return this.refuse(id, 'rate')
+    if (when === 'now')
+      void this.apply(c)
+  }
+
+  /** Carry out a command that passed the checks and the rate limit. */
+  private async apply(c: Cmd) {
+    const s = this.view.mine
+    if (s.p !== 'granted' || this.ctx.safety.panicked())
+      return
+    const id = s.id
+    const { session, playback } = this.ctx
+    switch (c.k) {
+      case 'edge':
+        session.edge()
+        break
+      case 'endEdge':
+        session.endEdge()
+        break
+      case 'level': {
+        const from = session.intensity.get()
+        // Expected before the move starts: its first step may be heard at once.
+        this.knob?.expect(from, Math.max(0.1, Math.min(session.intensity.max(), c.v)))
+        const to = session.intensity.set(c.v)
+        this.knob?.expect(from, to)
+        break
+      }
+      case 'stroke': {
+        const st = this.ctx.player.state()
+        if (st.playing && st.hasScript) {
+          this.refuse(id, 'script')
+          break
+        }
+        if (this.strokes && !this.strokes.active) {
+          // The owner picked another motion source by hand: theirs now.
+          this.refuse(id, 'owner')
+          break
+        }
+        this.strokes ??= this.ctx.motion.take()
+        if (!this.strokes) {
+          this.refuse(id, 'panic')
+          break
+        }
+        if (c.spm <= 0)
+          this.strokes.hold()
+        else
+          this.strokes.set({ spm: c.spm, depth: c.depth })
+        break
+      }
+      case 'strokeStop':
+        if (this.strokes?.active)
+          this.strokes.hold()
+        break
+      case 'pause':
+        playback.pause()
+        break
+      case 'resume':
+        playback.resume()
+        break
+      case 'next':
+      case 'pick': {
+        if (this.view.role !== 'host') {
+          this.refuse(id, 'host')
+          break
+        }
+        const target = c.k === 'pick' ? this.libIds[c.i] : await this.nextVideo()
+        if (!target || !(await playback.play(target).catch(() => false)))
+          this.refuse(id, 'missing')
+        break
+      }
+    }
+    // Show the result soon rather than at the next heartbeat.
+    this.liveSig = ''
+  }
+
+  private async scripted() {
+    try {
+      return (await this.ctx.library.list()).filter(v => v.hasScript)
+    }
+    catch {
+      return []
+    }
+  }
+
+  /** The scripted video after the one playing, in library order (playhound has no queue to skip in, for plugins). */
+  private async nextVideo(): Promise<string | null> {
+    const list = await this.scripted()
+    if (!list.length)
+      return null
+    const cur = this.ctx.player.state().title
+    const i = list.findIndex(v => v.id === cur)
+    return list[(i + 1) % list.length].id
+  }
+
+  private async sendLib() {
+    const list = (await this.scripted()).slice(0, 200)
+    const s = this.view.mine
+    if (s.p !== 'granted')
+      return
+    this.libIds = list.map(v => v.id)
+    this.send({ t: 'pcLib', id: s.id, items: list.map(v => ({ title: v.title.slice(0, 300), dur: Math.max(0, Math.min(86_400, v.durationS ?? 0)) })) })
+  }
+
+  private liveNow(): Live {
+    const { session, player } = this.ctx
+    const es = session.edgeState()
+    const r = this.ctx.motion.readout()
+    const st = player.state()
+    const r2 = (x: number) => Math.round(Math.max(0, Math.min(1, x)) * 100) / 100
+    return {
+      level: r2(session.intensity.get()),
+      max: r2(session.intensity.max()),
+      eff: r2(es.effective),
+      edge: es.phase,
+      left: Math.max(0, Math.min(3600, Math.round(es.remainingSec))),
+      panic: this.ctx.safety.panicked(),
+      title: st.title ? st.title.slice(0, 300) : null,
+      playing: st.playing,
+      script: st.playing && st.hasScript,
+      spm: Math.max(0, Math.min(600, Math.round(r.spm))),
+      depth: r2(r.depth),
+      maxSpm: Math.max(0, Math.min(600, Math.round(r.maxSpm))),
+      stroking: !!this.strokes?.active && r.spm > 0,
+    }
+  }
+
+  /** My session as my partner sees it: when it changes (5 a second at most), and every second. */
+  private sendLive(t: number) {
+    const s = this.view.mine
+    if (s.p !== 'granted')
+      return
+    const live = this.liveNow()
+    const sig = JSON.stringify(live)
+    if ((sig !== this.liveSig && t - this.liveAt >= 200) || t - this.liveAt >= 1000) {
+      this.liveSig = sig
+      this.liveAt = t
+      this.send({ t: 'pcLive', id: s.id, s: live })
+    }
   }
 }

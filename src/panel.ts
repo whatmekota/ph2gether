@@ -1,7 +1,10 @@
 import type { ChatLine } from './chat'
+import type { Kid } from './dom'
 import type { Together, View } from './session'
 import type { PluginContext } from './types'
 import { CHAT_MAX, splitLinks } from './chat'
+import { buildControl, controlShape, controlUi } from './controlPanel'
+import { h } from './dom'
 import { EMOJI_NAMES, EMOJIS } from './emoji'
 import { strategyName } from './session'
 
@@ -11,31 +14,6 @@ import { strategyName } from './session'
  * verification state…); live numbers (latency, drift) are updated in place,
  * so a button never disappears from under the pointer.
  */
-
-type Kid = Node | string | null | undefined | false
-
-function h<K extends keyof HTMLElementTagNameMap>(tag: K, props: Record<string, unknown> = {}, ...kids: Kid[]): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag)
-  for (const [k, v] of Object.entries(props)) {
-    if (v === undefined || v === null || v === false)
-      continue
-    if (k === 'class')
-      el.className = String(v)
-    else if (k === 'text')
-      el.textContent = String(v)
-    else if (k === 'value')
-      (el as HTMLInputElement).value = String(v)
-    else if (k.startsWith('on') && typeof v === 'function')
-      el.addEventListener(k.slice(2), v as EventListener)
-    else
-      el.setAttribute(k, v === true ? '' : String(v))
-  }
-  for (const k of kids) {
-    if (k)
-      el.append(k)
-  }
-  return el
-}
 
 const ms = (s: number) => `${Math.round(s * 1000)} ms`
 
@@ -68,7 +46,7 @@ function guestLine(v: View): { text: string, s: 'ok' | 'busy' | 'warn' | 'bad' }
 /** What decides the layout; the rest is filled in place. */
 function shapeOf(v: View): string {
   const g = guestLine(v)
-  return JSON.stringify([v.phase, v.role, v.code, v.notice, v.emojis, v.verifiedHere, v.verifiedThere, v.control, v.video?.title, v.hostPlaying, g.text, v.panicked])
+  return JSON.stringify([v.phase, v.role, v.code, v.notice, v.emojis, v.verifiedHere, v.verifiedThere, v.control, v.video?.title, v.hostPlaying, g.text, v.panicked, controlShape(v)])
 }
 
 export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): () => void {
@@ -78,12 +56,14 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
   const live: { rtt?: HTMLElement, drift?: HTMLElement, chat?: HTMLElement, chatIn?: HTMLInputElement } = {}
   let codeDraft = ''
   let chatDraft = ''
+  const ctlUi = controlUi()
+  let ctl: { update: (v: View) => void } | null = null
   t.panelsOpen++
 
-  function render() {
+  function render(force = false) {
     const v = t.view
     const next = shapeOf(v)
-    if (next !== shape) {
+    if (next !== shape || force) {
       shape = next
       const input = root.querySelector<HTMLInputElement>('.p2g-code-in')
       if (input)
@@ -96,6 +76,7 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
         live.chatIn?.focus()
     }
     syncChat()
+    ctl?.update(v)
     if (live.rtt)
       live.rtt.textContent = v.rttMs === null ? '…' : `${v.rttMs} ms`
     if (live.drift)
@@ -119,6 +100,7 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
     live.drift = undefined
     live.chat = undefined
     live.chatIn = undefined
+    ctl = null
     const kids = v.phase === 'idle' ? buildIdle(v) : v.phase === 'connected' ? buildConnected(v) : buildWaiting(v)
     return kids.filter((k): k is Node => k instanceof Node)
   }
@@ -299,8 +281,16 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
       log.scrollTop = log.scrollHeight
   }
 
+  function controlCard(v: View) {
+    const c = buildControl(v, t, ctlUi, () => render(true))
+    ctl = c
+    return c.node
+  }
+
   function buildConnected(v: View): Kid[] {
     live.rtt = h('span', { class: 'p2g-num' })
+    // Being controlled goes first: it's the thing to see, and to undo.
+    const owned = v.mine.p === 'granted' || v.mine.p === 'asked'
     return [
       h('div', { class: 'p2g-status' },
         h('i', { 'class': 'p2g-dot', 'data-s': 'ok' }),
@@ -316,15 +306,17 @@ export function mountPanel(el: HTMLElement, t: Together, ctx: PluginContext): ()
             : 'Their video plays here, in step with theirs.'),
       ),
       noticeEl(v),
+      owned && controlCard(v),
       verifyCard(v),
       playingCard(v),
+      !owned && controlCard(v),
       chatCard(),
       h('p', { class: 'p2g-fine' }, 'Panic stops your own device, and pauses your partner\'s video. Your speed limit and ranges stay yours.'),
       h('div', { class: 'p2g-row p2g-end' }, h('code', { class: 'p2g-fine p2g-grow' }, v.code ?? ''), leaveBtn()),
     ]
   }
 
-  const off = t.onUpdate(render)
+  const off = t.onUpdate(() => render())
   render()
   return () => {
     off()

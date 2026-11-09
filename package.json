@@ -1,12 +1,12 @@
 {
   "name": "ph2gether",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
     "build:public": "node build.mjs --public --minify",
-    "test": "node --import tsx --test test/room.test.ts test/emoji.test.ts test/sync.test.ts test/protocol.test.ts test/chat.test.ts",
+    "test": "node --import tsx --test test/room.test.ts test/emoji.test.ts test/sync.test.ts test/protocol.test.ts test/chat.test.ts test/control.test.ts test/session.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

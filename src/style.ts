@@ -60,4 +60,35 @@ export const CSS = `
 .p2g-switch input::after { content: ''; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: var(--text); transition: transform var(--dur-fast, 120ms); }
 .p2g-switch input:checked { background: var(--accent); }
 .p2g-switch input:checked::after { transform: translateX(11px); background: var(--accent-contrast); }
+.p2g-sub { margin-top: 2px; color: var(--text-faint); font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.p2g-control[data-owned] { border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+.p2g-owned { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: var(--radius-md, 10px); border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent); background: color-mix(in srgb, var(--warn) 10%, var(--bg-850)); }
+.p2g-owned-head { display: flex; align-items: center; gap: 7px; }
+.p2g-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 25%, transparent); animation: p2g-pulse 1.6s ease-in-out infinite; }
+.p2g-ask { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: var(--radius-md, 10px); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 8%, var(--bg-850)); }
+.p2g-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.p2g-chip { padding: 1px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; background: var(--bg-700); color: var(--text); }
+.p2g-take { background: var(--warn); border-color: var(--warn); color: #111; font-weight: 650; }
+.p2g-take:hover { background: color-mix(in srgb, var(--warn) 85%, #fff); }
+.p2g-powers { display: flex; flex-direction: column; gap: 6px; }
+.p2g-power { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.p2g-power input { margin: 2px 0 0; accent-color: var(--accent); flex: none; }
+.p2g-power-text { display: flex; flex-direction: column; gap: 1px; line-height: 1.35; }
+.p2g-tag { align-self: flex-start; padding: 0 6px; border-radius: 99px; font-size: 10px; font-weight: 600; background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+.p2g-stat { display: flex; align-items: baseline; gap: 6px; color: var(--text-muted); }
+.p2g-stat .p2g-num { color: var(--text); white-space: normal; text-align: right; overflow-wrap: anywhere; }
+.p2g-slider { display: grid; grid-template-columns: 62px 1fr 52px; align-items: center; gap: 8px; }
+.p2g-slider .p2g-num { text-align: right; }
+.p2g-range { width: 100%; accent-color: var(--accent); margin: 0; }
+.p2g-select { font-family: inherit; }
+.p2g-refused { color: var(--warn); min-height: 0; }
+.p2g-refused:empty { display: none; }
+.p2g-pill { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 2147483000; display: flex; align-items: center; gap: 9px; max-width: calc(100vw - 32px); padding: 6px 6px 6px 12px; border-radius: 99px; font-size: 12.5px; color: var(--text); background: color-mix(in srgb, var(--warn) 16%, var(--bg-900, #111)); border: 1px solid color-mix(in srgb, var(--warn) 60%, transparent); box-shadow: 0 6px 24px rgb(0 0 0 / .35); }
+.p2g-pill[data-s=asked] { background: color-mix(in srgb, var(--accent) 16%, var(--bg-900, #111)); border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.p2g-pill-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.p2g-pill-text span { color: var(--text-muted); }
+.p2g-pill-btn { height: 26px; padding: 0 12px; border-radius: 99px; border: 0; font: inherit; font-weight: 650; cursor: pointer; background: var(--warn); color: #111; flex: none; }
+.p2g-pill[data-s=asked] .p2g-pill-btn { background: var(--accent); color: var(--accent-contrast); }
+.p2g-pill-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .p2g-live-dot { animation: none; } }
 `

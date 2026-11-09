@@ -1,4 +1,5 @@
 import type { PluginContext } from './types'
+import { mountIndicator } from './indicator'
 import { mountPanel } from './panel'
 import { strategyName, Together } from './session'
 import { CSS } from './style'
@@ -46,9 +47,18 @@ export default function activate(ctx: PluginContext) {
       hint: 'When you join: play at the host\'s speed. Yours is put back when you leave.',
       default: true,
     },
+    {
+      key: 'name',
+      type: 'text',
+      label: 'Your name, for your partner',
+      hint: 'Shown on their side ("Sam has control"). Leave it empty to be "your partner". Applies to rooms you open or join after.',
+      placeholder: 'Optional',
+      default: '',
+    },
   ])
 
   ctx.ui.panel({ title: 'Together', icon: ICON, mount: el => mountPanel(el, together, ctx) })
+  const offIndicator = mountIndicator(together, ctx)
 
   ctx.commands.register({
     id: 'invite',
@@ -86,8 +96,22 @@ export default function activate(ctx: PluginContext) {
 
   const offPanic = ctx.safety.onPanic(() => together.onLocalPanic())
 
+  ctx.commands.register({
+    id: 'take-back',
+    title: 'Take back control',
+    hint: 'End your partner\'s control of your session',
+    icon: ICON,
+    run() {
+      if (together.view.mine.p === 'granted')
+        together.takeBack()
+      else
+        ctx.ui.toast('Nobody controls your session')
+    },
+  })
+
   return () => {
     offPanic()
+    offIndicator()
     together.dispose()
   }
 }
