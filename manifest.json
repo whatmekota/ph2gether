@@ -3,6 +3,7 @@
   "name": "ph2gether",
   "version": "0.2.0",
   "description": "Together mode: watch and play in sync with a partner over the internet, each with your own playhound and device, and hand each other the controls.",
+  "icon": "icon.png",
   "author": "whatmekota",
   "main": "index.js",
   "api": 3,

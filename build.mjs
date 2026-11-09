@@ -89,12 +89,16 @@ mkdirSync(join(here, 'dist'), { recursive: true })
 const out = zip([
   ['manifest.json', readFileSync(join(here, 'manifest.json'))],
   ['index.js', readFileSync(join(here, 'dist/index.js'))],
+  // The store's icon, also for an install from the zip.
+  ['icon.png', readFileSync(join(here, 'icon.png'))],
 ])
 let where
 if (PUBLIC) {
   mkdirSync(join(here, 'release'), { recursive: true })
   where = join('release', `ph2gether-${manifest.version}.zip`)
   writeFileSync(join(here, where), out)
+  // The icon beside it, as a release asset: the store shows it before downloading.
+  writeFileSync(join(here, 'release', 'icon.png'), readFileSync(join(here, 'icon.png')))
   // The store in playhound reads this to show the plugin before downloading it.
   writeFileSync(join(here, 'release', 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 }
