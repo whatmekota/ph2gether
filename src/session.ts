@@ -4,6 +4,7 @@ import type { Link } from './net'
 import type { Cmd, EndWhy, GuestState, LibItem, Live, Msg, NoWhy, Power, Role, StateMsg, VideoRef } from './protocol'
 import type { RoomCode, Strategy } from './room'
 import type { MotionControl, PluginContext } from './types'
+import { Awards, LONG_NIGHT_MS } from './awards'
 import { CHAT_KEEP, cleanChat, createRateLimit } from './chat'
 import { CmdGate, cmdAllowed, createWindow, ctlStep, KnobWatch, newGrantId, ownerStep, powersText, RATE } from './control'
 import { sasEmojis, sdpFingerprint } from './emoji'
@@ -109,6 +110,9 @@ export class Together {
   private relaysDownSince = 0
   private iceFailedAt = 0
   private generation = 0
+  /** When the partner first connected in this room; 0 before. */
+  private togetherSince = 0
+  private awards: Awards
 
   // Verification: the emojis of the pair verified before, this session.
   private sasKey: string | null = null
@@ -163,7 +167,10 @@ export class Together {
   /** The panel should put the cursor in the code box (the Join command). */
   focusJoin = false
 
-  constructor(private ctx: PluginContext) {}
+  constructor(private ctx: PluginContext) {
+    this.awards = new Awards(ctx)
+    this.awards.define()
+  }
 
   private blank(): View {
     return {
@@ -227,6 +234,8 @@ export class Together {
 
   private changed(patch: Partial<View> = {}) {
     Object.assign(this.view, patch)
+    if (('verifiedHere' in patch || 'verifiedThere' in patch) && this.verified)
+      this.awards.unlock('verified')
     for (const fn of this.updateFns) {
       try {
         fn()
@@ -350,6 +359,7 @@ export class Together {
     this.iceFailedAt = 0
     this.lastStatusSent = ''
     this.stale = false
+    this.togetherSince = 0
   }
 
   dispose() {
@@ -538,6 +548,9 @@ export class Together {
     // Partner control: the lower of the two versions; none if theirs predates it.
     const pc = Math.min(CONTROL_VERSION, m.pc ?? 0)
     this.changed({ phase: 'connected', notice: null, pc, partnerName: m.name ?? null, mine: { p: 'off' }, theirs: { p: 'off' }, their: null, lib: null, refused: null })
+    this.togetherSince ||= now()
+    this.awards.unlock('together')
+    void this.awards.day()
     this.sayLostEnds()
     void this.checkEmojis()
     this.pingNow()
@@ -602,6 +615,8 @@ export class Together {
     // A few quick pings to start with, then every couple of seconds.
     if (t - this.lastPingAt > (this.pingsSent < 6 ? 250 : SYNC.pingMs))
       this.pingNow()
+    if (!this.stale && this.togetherSince && t - this.togetherSince >= LONG_NIGHT_MS)
+      this.awards.unlock('long-night')
     const panicked = this.ctx.safety.panicked()
     if (panicked !== this.view.panicked)
       this.changed({ panicked })
@@ -992,8 +1007,10 @@ export class Together {
       return
     this.applyStep(r)
     this.changed({ mine: r.s })
-    if (r.began && r.s.p === 'granted')
+    if (r.began && r.s.p === 'granted') {
       this.beginOwned(r.s.powers)
+      this.awards.unlock('hand-over')
+    }
     if (r.ended) {
       if (r.ended === 'lost' && before.p === 'granted')
         this.lostEnds.push({ t: 'pcEnd', id: before.id, why: 'off' })
@@ -1011,6 +1028,8 @@ export class Together {
     if (r.began || r.s.p !== 'granted')
       Object.assign(patch, { their: null, lib: null, refused: null })
     this.changed(patch)
+    if (r.began && r.s.p === 'granted')
+      this.awards.unlock('take-over')
     if (r.ended === 'lost' && before.p === 'granted')
       this.lostEnds.push({ t: 'pcStop', id: before.id, why: 'off' })
     if (r.ended === 'lost')

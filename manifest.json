@@ -1,12 +1,12 @@
 {
   "id": "ph2gether",
   "name": "ph2gether",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Together mode: watch and play in sync with a partner over the internet, each with your own playhound and device, and hand each other the controls.",
   "icon": "icon.png",
   "author": "whatmekota",
   "main": "index.js",
-  "api": 3,
+  "api": 7,
   "permissions": [
     "player",
     "playback",
@@ -27,5 +27,5 @@
     "webrtc",
     "chat"
   ],
-  "minPlayhound": "2.2.0"
+  "minPlayhound": "2.2.8"
 }

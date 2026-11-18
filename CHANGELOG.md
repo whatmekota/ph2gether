@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+Plugin API 7. Needs playhound 2.2.8, on both sides.
+
+- Achievements of its own, in Stats → Achievements: your first time together, a verified room, handing your partner the controls, taking theirs, an hour together in one room, and getting together on ten different days.
+- `src/types.ts` from playhound 2.2.8.
+- Nothing changes between the two apps: a partner on 0.2 connects and hands over control as before.
+
 ## 0.2.0
 
 Partner control. Needs playhound 2.2, on both sides.

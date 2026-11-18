@@ -2,6 +2,7 @@ import type { Msg } from '../src/protocol.ts'
 import type { PluginContext } from '../src/types.ts'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { Awards, LONG_NIGHT_MS } from '../src/awards.ts'
 import { Together } from '../src/session.ts'
 
 /**
@@ -17,6 +18,7 @@ import { Together } from '../src/session.ts'
  */
 function fakeApp(core: 'new' | 'old' = 'new') {
   const calls: string[] = []
+  const unlocked: string[] = []
   const app = {
     level: 0.4,
     max: 0.8,
@@ -44,6 +46,7 @@ function fakeApp(core: 'new' | 'old' = 'new') {
     settings: { get: () => undefined, set: () => {}, all: () => ({}), onChange: () => () => {} },
     ui: { toast: (text: string) => calls.push(`toast:${text}`), openPanel: () => {} },
     log: () => {},
+    achievements: { define: () => {}, unlock: (id: string) => unlocked.push(id) > 0, progress: () => {}, unlocked: () => ({}) },
     session: {
       edge: () => calls.push('edge'),
       endEdge: () => calls.push('endEdge'),
@@ -159,7 +162,7 @@ function fakeApp(core: 'new' | 'old' = 'new') {
     },
     library: { list: async () => [{ id: 'a.mp4', title: 'a', hasScript: true, durationS: 60 }, { id: 'b.mp4', title: 'b', hasScript: true, durationS: 90 }, { id: 'c.mp4', title: 'c', hasScript: false, durationS: 5 }] },
   } as unknown as PluginContext
-  return { app, ctx, calls, setLevel, lift }
+  return { app, ctx, calls, unlocked, setLevel, lift }
 }
 
 /** A Together connected to a partner, in a verified room, both on partner control. */
@@ -455,4 +458,49 @@ test('leaving the room ends control with a word', async () => {
   await c.t.leave()
   assert.ok(c.sent.some(m => m.t === 'pcEnd' && m.why === 'off'))
   assert.equal(c.app.level, 0.4)
+})
+
+test('achievements: handing over control and taking it, each on its own side', () => {
+  const c = connected()
+  grant(c, ['edge'])
+  assert.deepEqual(c.unlocked, ['hand-over'])
+  c.t.askControl(['edge'])
+  c.recv({ t: 'pcGrant', id: 'gtheirs1', powers: ['edge'] })
+  assert.deepEqual(c.unlocked, ['hand-over', 'take-over'])
+})
+
+test('achievements: verified once both say the emojis match', () => {
+  const c = connected()
+  Object.assign(c.t.view, { verifiedHere: false, verifiedThere: false, emojis: ['🐙', '🌵', '🎈', '🦊', '🍋'] })
+  c.t.markVerified()
+  assert.deepEqual(c.unlocked, [])
+  c.recv({ t: 'verified' })
+  assert.deepEqual(c.unlocked, ['verified'])
+})
+
+test('achievements: together on connecting, and a long night after an hour in the room', () => {
+  const c = connected()
+  c.any.partner = null
+  c.recv({ t: 'hello', v: 1, role: 'guest', app: '0.3.0', pc: 1 })
+  assert.deepEqual(c.unlocked, ['together'])
+  c.any.tick()
+  assert.ok(!c.unlocked.includes('long-night'))
+  c.any.togetherSince = performance.now() - LONG_NIGHT_MS
+  c.any.tick()
+  assert.ok(c.unlocked.includes('long-night'))
+  c.any.partner = null // stop the emoji check's retries
+})
+
+test('achievements: Regulars counts each day together once', async () => {
+  const stored = new Map<string, unknown>()
+  const progress: number[] = []
+  const a = new Awards({
+    achievements: { define: () => {}, unlock: () => true, progress: (_id: string, n: number) => void progress.push(n), unlocked: () => ({}) },
+    storage: { get: async (k: string) => stored.get(k) as any, set: async (k: string, v: unknown) => void stored.set(k, v), del: async () => {} },
+    log: () => {},
+  })
+  await a.day(new Date(2026, 10, 18, 21))
+  await a.day(new Date(2026, 10, 18, 23))
+  await a.day(new Date(2026, 10, 19, 1))
+  assert.deepEqual(progress, [1, 2])
 })

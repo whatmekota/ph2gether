@@ -4,7 +4,7 @@
 
 Each of you can also hand the other the controls of your own session: your partner calls your edges and turns your intensity, and you can take it back with one click.
 
-Needs playhound **2.2** or newer, on both sides.
+Needs playhound **2.2.8** or newer, on both sides.
 
 ## Install
 
@@ -74,6 +74,10 @@ Both apps say which version of partner control they speak when they connect. If 
 - Without partner control, nothing your partner sends reaches your device, and your speed limit, ranges and every other device setting stay yours. Their app can only play, pause and seek your video, and send you chat messages (shown as plain text; links open in your browser).
 - With it, only what you ticked, only while you let them, and always through playhound's own limits (above).
 - If the connection drops, the guest's video pauses, so the device stops following.
+
+## Achievements
+
+A few of its own, in playhound's **Stats → Achievements**: your first time together, a verified room, handing your partner the controls and taking theirs, an hour together in one room, and getting together on ten different days.
 
 ## Privacy
 
